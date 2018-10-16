@@ -1,0 +1,531 @@
+---
+title: "SQL3-R"
+author: "Nikita Thomas"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(RPostgreSQL)
+# install.packages("RPostgreSQL")
+require("RPostgreSQL")
+```
+
+```{r}
+# loads the PostgreSQL driver
+drv <- dbDriver("PostgreSQL")
+# creates a connection to the postgres database
+# note that "con" will be used later in each connection to the database
+con <- dbConnect(drv, dbname = "hs611db",
+                 host = "localhost", port = 5432,
+                 user = "nikitathomas")
+rm(pw) # removes the password
+
+# checking tables
+dbExistsTable(con, "cmspop", 'cmsclaim')
+# TRUE
+```
+
+####Question 1
+```{r}
+Q1<- 
+"SELECT AVG(hmo_mo) AS avg_hmo_mo
+FROM
+	(SELECT id FROM cmspop WHERE cancer = True) AS LHS
+LEFT JOIN
+	(SELECT id, hmo_mo FROM cmsclaims) AS RHS
+ON LHS.id = RHS.id;"
+dbGetQuery(con, Q1)
+
+```
+
+####Question 2
+```{r}
+Q2<- 
+"SELECT LHS.id, LHS.sex, LHS.race, LHS.state, LHS.county, LHS.alz_rel_sen, LHS.heart_fail, LHS.cancer, LHS.depression, LHS.dob, LHS.dod
+FROM
+	(SELECT id, sex, race, state, county, alz_rel_sen,
+		heart_fail, cancer, depression, dob, dod,
+		(dod-dob)::float AS age_of_death
+	FROM cmspop
+	WHERE dod IS NOT NULL) AS LHS
+CROSS JOIN 
+(SELECT AVG(dod-dob)::float AS avg_age_of_death FROM cmspop WHERE dod IS NOT NULL) AS RHS
+WHERE age_of_death < avg_age_of_death
+ORDER BY id ASC
+LIMIT 5;"
+dbGetQuery(con, Q2) 
+```
+
+####Question 3
+```{r}
+Q3<- 
+"SELECT state, SUM(RHS.carrier_reimb) AS total_carrier_reimb
+FROM
+	(SELECT id, state FROM cmspop) AS LHS
+LEFT JOIN
+	(SELECT id, carrier_reimb FROM cmsclaims) AS RHS
+ON LHS.id = RHS.id
+GROUP BY state
+ORDER BY state ASC;"
+dbGetQuery(con, Q3) 
+```
+
+####Question 4
+```{r}
+Q4<- 
+"SELECT state, SUM(RHS.carrier_reimb) AS total_carrier_reimb_on_depression
+FROM
+	(SELECT id, state FROM cmspop WHERE depression = True) AS LHS
+LEFT JOIN
+	(SELECT id, carrier_reimb FROM cmsclaims) AS RHS
+ON LHS.id = RHS.id
+GROUP BY state
+ORDER BY total_carrier_reimb_on_depression DESC 
+LIMIT 1;"
+dbGetQuery(con, Q4) 
+```
+
+####Question 5
+```{r}
+Q5<- 
+"SELECT LHS.state, (LHS.num_heart_fail_claims::float/RHS.num_claims) AS proportion_heart_fail_claims
+FROM
+	(SELECT state, COUNT(*) AS num_heart_fail_claims FROM cmspop WHERE heart_fail = True GROUP BY state) AS LHS
+LEFT JOIN
+	(SELECT state, COUNT(*) AS num_claims FROM cmspop GROUP BY state) AS RHS
+ON LHS.state = RHS.state
+ORDER BY proportion_heart_fail_claims DESC;"
+dbGetQuery(con, Q5) 
+```
+
+####Question 6
+```{r}
+Q6<- 
+"SELECT id, sex, race, round(((age_of_death - avg_age_of_death) / 365.00)::numeric, 2) AS deviation
+FROM
+	(SELECT id, sex, race, (dod-dob)::float AS age_of_death
+		FROM cmspop
+		WHERE dod IS NOT NULL) AS LHS
+CROSS JOIN
+	(SELECT AVG(dod-dob)::float AS avg_age_of_death FROM cmspop WHERE dod IS NOT NULL) AS RHS
+ORDER BY id ASC 
+LIMIT 10;"
+dbGetQuery(con, Q6) 
+```
+
+####Question 7
+```{r}
+dbGetQuery(con, 
+"SELECT state, SUM(carrier_reimb) AS total_carrier_reimb FROM
+   (SELECT id, state, race
+     FROM cmspop
+     WHERE state IN
+       (SELECT state
+         FROM
+         (SELECT state, COUNT(*) AS num_claims_of_race
+           FROM cmspop
+           WHERE race IN
+             (SELECT race
+               FROM
+                 (SELECT race, COUNT(*) AS num_claims
+                 FROM cmspop
+                 WHERE state = 'TX'
+                 GROUP BY race
+                 ORDER BY num_claims DESC
+                 LIMIT 1)
+                 AS sub_subgroup)
+           GROUP BY state
+           ORDER BY num_claims_of_race ASC
+           LIMIT 1) AS subgroup)
+       OR state = 'TX') AS LHS
+LEFT JOIN
+   (SELECT id, carrier_reimb, hmo_mo, bene_resp FROM cmsclaims) AS RHS
+ON LHS.id = RHS.id
+GROUP BY state; ") 
+
+dbGetQuery(con, 
+"SELECT LLHS.state, LLHS.race, LLHS.total_carrier_reimb AS total_reimb, LLHS.avg_hmo_mo,
+      LLHS.avg_bene_resp, RRHS.aggregate_carrier_reimb
+FROM
+   (SELECT LHS.state, LHS.race, SUM(carrier_reimb) AS total_carrier_reimb,
+           AVG(hmo_mo) AS avg_hmo_mo, AVG(bene_resp) AS avg_bene_resp FROM
+       (SELECT id, state, race
+         FROM cmspop
+         WHERE state IN
+           (SELECT state
+             FROM
+             (SELECT state, COUNT(*) AS num_claims_of_race
+               FROM cmspop
+               WHERE race IN
+                 (SELECT race
+                   FROM
+                     (SELECT race, COUNT(*) AS num_claims
+                     FROM cmspop
+                     WHERE state = 'TX'
+                     GROUP BY race
+                     ORDER BY num_claims DESC
+                     LIMIT 1)
+                     AS sub_subgroup)
+               GROUP BY state
+               ORDER BY num_claims_of_race ASC
+               LIMIT 1) AS subgroup)
+           OR state = 'TX') AS LHS
+   LEFT JOIN
+       (SELECT id, carrier_reimb, hmo_mo, bene_resp FROM cmsclaims) AS RHS
+   ON LHS.id = RHS.id
+   GROUP BY state, race) AS LLHS
+LEFT JOIN
+(SELECT state, SUM(carrier_reimb) AS aggregate_carrier_reimb FROM
+       (SELECT id, state, race
+         FROM cmspop
+         WHERE state IN
+           (SELECT state
+             FROM
+             (SELECT state, COUNT(*) AS num_claims_of_race
+               FROM cmspop
+               WHERE race IN
+                 (SELECT race
+                   FROM
+                     (SELECT race, COUNT(*) AS num_claims
+                     FROM cmspop
+                     WHERE state = 'TX'
+                     GROUP BY race
+                     ORDER BY num_claims DESC
+                     LIMIT 1)
+                     AS sub_subgroup)
+               GROUP BY state
+               ORDER BY num_claims_of_race ASC
+               LIMIT 1) AS subgroup)
+           OR state = 'TX') AS LHS
+     LEFT JOIN
+             (SELECT id, carrier_reimb, hmo_mo, bene_resp FROM cmsclaims) AS RHS
+         ON LHS.id = RHS.id
+         GROUP BY state) AS RRHS
+ON LLHS.state = RRHS.state; ") 
+
+dbGetQuery(con, 
+"SELECT state, race,
+      ((total_reimb / aggregate_carrier_reimb::float) * 100)::float AS percent_reimbs,
+      avg_hmo_mo, avg_bene_resp
+FROM
+   (SELECT LLHS.state, LLHS.race, LLHS.total_carrier_reimb AS total_reimb, LLHS.avg_hmo_mo,
+          LLHS.avg_bene_resp, RRHS.aggregate_carrier_reimb
+   FROM
+       (SELECT LHS.state, LHS.race, SUM(carrier_reimb) AS total_carrier_reimb,
+               AVG(hmo_mo) AS avg_hmo_mo, AVG(bene_resp) AS avg_bene_resp FROM
+           (SELECT id, state, race
+             FROM cmspop
+             WHERE state IN
+               (SELECT state
+                 FROM
+                 (SELECT state, COUNT(*) AS num_claims_of_race
+                   FROM cmspop
+                   WHERE race IN
+                     (SELECT race
+                       FROM
+                         (SELECT race, COUNT(*) AS num_claims
+                         FROM cmspop
+                         WHERE state = 'TX'
+                         GROUP BY race
+                         ORDER BY num_claims DESC
+                         LIMIT 1)
+                         AS sub_subgroup)
+                   GROUP BY state
+                   ORDER BY num_claims_of_race ASC
+                   LIMIT 1) AS subgroup)
+               OR state = 'TX') AS LHS
+       LEFT JOIN
+           (SELECT id, carrier_reimb, hmo_mo, bene_resp FROM cmsclaims) AS RHS
+       ON LHS.id = RHS.id
+       GROUP BY state, race) AS LLHS
+   LEFT JOIN
+   (SELECT state, SUM(carrier_reimb) AS aggregate_carrier_reimb FROM
+           (SELECT id, state, race
+             FROM cmspop
+             WHERE state IN
+               (SELECT state
+                 FROM
+                 (SELECT state, COUNT(*) AS num_claims_of_race
+                   FROM cmspop
+                   WHERE race IN
+                     (SELECT race
+                       FROM
+                         (SELECT race, COUNT(*) AS num_claims
+                         FROM cmspop
+                         WHERE state = 'TX'
+                         GROUP BY race
+                         ORDER BY num_claims DESC
+                         LIMIT 1)
+                         AS sub_subgroup)
+                   GROUP BY state
+                   ORDER BY num_claims_of_race ASC
+                   LIMIT 1) AS subgroup)
+               OR state = 'TX') AS LHS
+         LEFT JOIN
+                 (SELECT id, carrier_reimb, hmo_mo, bene_resp FROM cmsclaims) AS RHS
+             ON LHS.id = RHS.id
+             GROUP BY state) AS RRHS
+   ON LLHS.state = RRHS.state) AS large_outer_q
+WHERE race IN
+   (SELECT race
+     FROM
+       (SELECT race, COUNT(*) AS num_claims
+       FROM cmspop
+       WHERE state = 'TX'
+       GROUP BY race
+       ORDER BY num_claims DESC
+       LIMIT 1) AS subgroup)
+ORDER BY state ASC; ") 
+```
+
+####Question 8
+```{r}
+dbGetQuery(con, "SELECT CASE
+WHEN alz_rel_sen = 't' THEN 'alz_ren_sen'
+   WHEN heart_fail = 't' THEN 'heart_fail'
+   WHEN cancer = 't' THEN 'cancer'
+   WHEN depression = 't' THEN 'depression'
+ END AS ailment
+from cmspop
+WHERE id IN ('001731EB127233DA', '001A6B93EEA3062E', '00258EEA7B4078D1', '00244B6D9AB50F9B');")
+
+dbGetQuery(con, "SELECT * FROM
+   (SELECT id, dob, dod,
+   CASE
+       WHEN alz_rel_sen = 't' THEN 'alz'
+       ELSE 'no'
+   END AS alz,
+   CASE
+       WHEN heart_fail = 't' THEN 'heart'
+       ELSE 'no'
+   END AS heart,
+   CASE
+       WHEN cancer = 't' THEN 'canc'
+       ELSE 'no'
+   END AS canc,
+   CASE
+       WHEN depression = 't' THEN 'dep'
+       ELSE 'no'
+   END AS dep
+ FROM cmspop
+ WHERE id = '00196F0702489342') AS LHS
+CROSS JOIN
+ (SELECT CASE
+ WHEN alz_rel_sen = 't' THEN 'alz'
+    WHEN heart_fail = 't' THEN 'heart'
+    WHEN cancer = 't' THEN 'canc'
+    WHEN depression = 't' THEN 'dep'
+   END AS ailment
+ FROM cmspop
+ WHERE id IN ('001731EB127233DA', '001A6B93EEA3062E', '00258EEA7B4078D1', '00244B6D9AB50F9B')) AS RHS;")
+
+dbGetQuery(con, "SELECT id, dob, dod, ailment, CASE
+   WHEN alz = ailment THEN 1
+   WHEN heart = ailment THEN 1
+   WHEN canc = ailment THEN 1
+   WHEN dep = ailment THEN 1
+   ELSE 0
+   END AS claims
+
+FROM
+ (
+   (SELECT id, dob, dod,
+   CASE
+       WHEN alz_rel_sen = 't' THEN 'alz'
+       ELSE 'no'
+   END AS alz,
+   CASE
+       WHEN heart_fail = 't' THEN 'heart'
+       ELSE 'no'
+   END AS heart,
+   CASE
+       WHEN cancer = 't' THEN 'canc'
+       ELSE 'no'
+   END AS canc,
+   CASE
+       WHEN depression = 't' THEN 'dep'
+       ELSE 'no'
+   END AS dep
+ FROM cmspop
+ WHERE id IN ('00196F0702489342', '00187DB5DFDE4D18')) AS LHS
+CROSS JOIN
+ (SELECT CASE
+ WHEN alz_rel_sen = 't' THEN 'alz'
+    WHEN heart_fail = 't' THEN 'heart'
+    WHEN cancer = 't' THEN 'canc'
+    WHEN depression = 't' THEN 'dep'
+   END AS ailment
+ FROM cmspop
+ WHERE id IN ('001731EB127233DA', '001A6B93EEA3062E', '00258EEA7B4078D1', '00244B6D9AB50F9B')) AS RHS
+) AS subgroup
+ORDER BY id, ailment ASC;")
+
+dbGetQuery(con, "SELECT LLHS.id, LLHS.dob, LLHS.ailment, LLHS.claims, RRHS.carrier_reimb, CASE
+ WHEN dod IS NULL THEN (to_date('2010-01-01', 'YYYY-MM-DD') - dob)
+ ELSE dod - dob
+ END AS age_days
+FROM
+   (SELECT id, dob, dod, ailment, CASE
+       WHEN alz = ailment THEN 1
+       WHEN heart = ailment THEN 1
+       WHEN canc = ailment THEN 1
+       WHEN dep = ailment THEN 1
+       ELSE 0
+       END AS claims
+   
+   FROM
+     (
+       (SELECT id, dob, dod,
+       CASE
+           WHEN alz_rel_sen = 't' THEN 'alz'
+           ELSE 'no'
+       END AS alz,
+       CASE
+           WHEN heart_fail = 't' THEN 'heart'
+           ELSE 'no'
+       END AS heart,
+       CASE
+           WHEN cancer = 't' THEN 'canc'
+           ELSE 'no'
+       END AS canc,
+       CASE
+           WHEN depression = 't' THEN 'dep'
+           ELSE 'no'
+       END AS dep
+     FROM cmspop
+     WHERE id IN ('00196F0702489342', '00187DB5DFDE4D18')) AS LHS
+   CROSS JOIN
+     (SELECT CASE
+     WHEN alz_rel_sen = 't' THEN 'alz'
+        WHEN heart_fail = 't' THEN 'heart'
+        WHEN cancer = 't' THEN 'canc'
+        WHEN depression = 't' THEN 'dep'
+       END AS ailment
+     FROM cmspop
+     WHERE id IN ('001731EB127233DA', '001A6B93EEA3062E', '00258EEA7B4078D1', '00244B6D9AB50F9B')) AS RHS
+   ) AS subgroup
+   ORDER BY id, ailment ASC) AS LLHS
+LEFT JOIN
+ (SELECT id, carrier_reimb FROM cmsclaims) AS RRHS
+ON LLHS.id = RRHS.id;")
+
+dbGetQuery(con, "SELECT ailment, floor(AVG(age_in_days)::float / 365)::int AS avg_age,
+       SUM(claims) AS num_claims, AVG(carrier_reimb) AS avg_reimb
+FROM
+   (SELECT LLHS.id, LLHS.dob, LLHS.ailment, LLHS.claims, RRHS.carrier_reimb, CASE
+     WHEN dod IS NULL THEN (to_date('2010-01-01', 'YYYY-MM-DD') - dob)
+     ELSE dod - dob
+     END AS age_in_days
+   FROM
+       (SELECT id, dob, dod, ailment, CASE
+           WHEN alz = ailment THEN 1
+           WHEN heart = ailment THEN 1
+           WHEN canc = ailment THEN 1
+           WHEN dep = ailment THEN 1
+           ELSE 0
+           END AS claims
+       
+       FROM
+         (
+           (SELECT id, dob, dod,
+           CASE
+               WHEN alz_rel_sen = 't' THEN 'alz'
+               ELSE 'no'
+           END AS alz,
+           CASE
+               WHEN heart_fail = 't' THEN 'heart'
+               ELSE 'no'
+           END AS heart,
+           CASE
+               WHEN cancer = 't' THEN 'canc'
+               ELSE 'no'
+           END AS canc,
+           CASE
+               WHEN depression = 't' THEN 'dep'
+               ELSE 'no'
+           END AS dep
+         FROM cmspop
+         WHERE id IN ('00196F0702489342', '00187DB5DFDE4D18')) AS LHS
+       CROSS JOIN
+         (SELECT CASE
+         WHEN alz_rel_sen = 't' THEN 'alz'
+            WHEN heart_fail = 't' THEN 'heart'
+            WHEN cancer = 't' THEN 'canc'
+            WHEN depression = 't' THEN 'dep'
+           END AS ailment
+         FROM cmspop
+         WHERE id IN ('001731EB127233DA', '001A6B93EEA3062E', '00258EEA7B4078D1', '00244B6D9AB50F9B')) AS RHS
+       ) AS subgroup
+       ORDER BY id, ailment ASC) AS LLHS
+   LEFT JOIN
+     (SELECT id, carrier_reimb FROM cmsclaims) AS RRHS
+   ON LLHS.id = RRHS.id
+   WHERE claims > 0) AS big_subgroup
+GROUP BY ailment;")
+
+dbGetQuery(con, "SELECT ailment, avg_age, (num_claims / total_claims::float) AS percent_claims, avg_reimb FROM
+ (SELECT ailment, floor(AVG(age_in_days)::float / 365)::int AS avg_age,
+         SUM(claims) AS num_claims, AVG(carrier_reimb) AS avg_reimb
+ FROM
+     (SELECT LLHS.id, LLHS.dob, LLHS.ailment, LLHS.claims, RRHS.carrier_reimb, CASE
+       WHEN dod IS NULL THEN (to_date('2010-01-01', 'YYYY-MM-DD') - dob)
+       ELSE dod - dob
+       END AS age_in_days
+     FROM
+         (SELECT id, dob, dod, ailment, CASE
+             WHEN alz = ailment THEN 1
+             WHEN heart = ailment THEN 1
+             WHEN canc = ailment THEN 1
+             WHEN dep = ailment THEN 1
+             ELSE 0
+             END AS claims
+         
+         FROM
+           (
+             (SELECT id, dob, dod,
+             CASE
+                 WHEN alz_rel_sen = 't' THEN 'alz'
+                 ELSE 'no'
+             END AS alz,
+             CASE
+                 WHEN heart_fail = 't' THEN 'heart'
+                 ELSE 'no'
+             END AS heart,
+             CASE
+                 WHEN cancer = 't' THEN 'canc'
+                 ELSE 'no'
+             END AS canc,
+             CASE
+                 WHEN depression = 't' THEN 'dep'
+                 ELSE 'no'
+             END AS dep
+           FROM cmspop
+           WHERE id IN ('00196F0702489342', '00187DB5DFDE4D18')) AS LHS
+         CROSS JOIN
+           (SELECT CASE
+           WHEN alz_rel_sen = 't' THEN 'alz'
+              WHEN heart_fail = 't' THEN 'heart'
+              WHEN cancer = 't' THEN 'canc'
+              WHEN depression = 't' THEN 'dep'
+             END AS ailment
+           FROM cmspop
+           WHERE id IN ('001731EB127233DA', '001A6B93EEA3062E', '00258EEA7B4078D1', '00244B6D9AB50F9B')) AS RHS
+         ) AS subgroup
+         ORDER BY id, ailment ASC) AS LLHS
+     LEFT JOIN
+       (SELECT id, carrier_reimb FROM cmsclaims) AS RRHS
+     ON LLHS.id = RRHS.id
+     WHERE claims > 0) AS big_subgroup
+ GROUP BY ailment) AS LLLHS
+CROSS JOIN
+ (SELECT COUNT(*) AS total_claims FROM cmspop) AS RRRHS;")
+```
